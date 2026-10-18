@@ -19,6 +19,15 @@ pipeline {
     }
 
     stages {
+            stage('Main Branch Check') {
+            when {
+                branch 'main'
+            }
+
+            steps {
+                echo 'This stage runs only on main'
+            }
+        }
         stage('Checkout') {
             steps {
                 checkout scm
