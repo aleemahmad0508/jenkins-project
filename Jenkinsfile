@@ -1,72 +1,104 @@
+
 pipeline {
     agent any
 
     options {
         timestamps()
-        timeout(time: 10, unit: 'MINUTES')
-    }
-
-    parameters {
-        choice(
-            name: 'RUN_TESTS',
-            choices: ['yes', 'no'],
-            description: 'Run automated Python tests?'
-        )
+        timeout(time: 20, unit: 'MINUTES')
     }
 
     environment {
-        APP_NAME = 'jenkins-module-3'
+        IMAGE_NAME = 'jenkins-module-6'
     }
 
     stages {
-            stage('Main Branch Check') {
-            when {
-                branch 'main'
-            }
-
-            steps {
-                echo 'This stage runs only on main'
-            }
-        }
         stage('Checkout') {
             steps {
                 checkout scm
-                echo 'Source code is ready'
-                sh 'pwd'
-                sh 'ls -la'
+                sh 'python3 --version'
+                sh 'docker --version'
+                sh 'git rev-parse --short HEAD'
             }
         }
 
-        stage('Build and Install') {
+        stage('Install Tools') {
             steps {
-                echo "Preparing ${APP_NAME}"
-                sh 'python3 --version'
                 sh 'python3 -m venv .venv'
                 sh '.venv/bin/python -m pip install --upgrade pip'
-                sh '.venv/bin/python -m pip install pytest'
+                sh '.venv/bin/python -m pip install -r requirements-dev.txt'
             }
         }
 
-        stage('Test') {
-            when {
-                expression {
-                    params.RUN_TESTS == 'yes'
+        stage('Unit Tests') {
+            steps {
+                sh '''
+                    .venv/bin/python -m pytest -v \
+                        --junitxml=test-results.xml
+                '''
+            }
+        }
+
+        stage('Code Quality') {
+            steps {
+                sh '''
+                    .venv/bin/python -m flake8 \
+                        --output-file=flake8-report.txt \
+                        app.py tests/
+                '''
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                sh '''
+                    .venv/bin/python -m bandit \
+                        -r app.py \
+                        -f json \
+                        -o bandit-report.json
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    docker build \
+                        -t "$IMAGE_NAME:$BUILD_NUMBER" \
+                        -t "$IMAGE_NAME:latest" \
+                        .
+                '''
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        VERSIONED_IMAGE="$DOCKERHUB_USERNAME/$IMAGE_NAME:$BUILD_NUMBER"
+                        LATEST_IMAGE="$DOCKERHUB_USERNAME/$IMAGE_NAME:latest"
+
+                        docker tag "$IMAGE_NAME:$BUILD_NUMBER" "$VERSIONED_IMAGE"
+                        docker tag "$IMAGE_NAME:latest" "$LATEST_IMAGE"
+
+                        echo "$DOCKERHUB_TOKEN" | docker login \
+                            --username "$DOCKERHUB_USERNAME" \
+                            --password-stdin
+
+                        docker push "$VERSIONED_IMAGE"
+                        docker push "$LATEST_IMAGE"
+
+                        docker logout
+                    '''
                 }
-            }
-            steps {
-                sh '''
-                    .venv/bin/python -m pytest -v --junitxml=test-results.xml
-                '''
-            }
-        }
-
-        stage('Package') {
-            steps {
-                sh '''
-                    mkdir -p dist
-                    tar -czf dist/source.tar.gz app.py tests Jenkinsfile
-                    ls -lh dist/
-                '''
             }
         }
     }
@@ -77,22 +109,26 @@ pipeline {
                 testResults: 'test-results.xml',
                 allowEmptyResults: true
             )
+
             archiveArtifacts(
-                artifacts: 'dist/**,test-results.xml',
+                artifacts: 'test-results.xml,flake8-report.txt,bandit-report.json',
                 allowEmptyArchive: true
             )
+
+            echo 'CI/CD pipeline finished.'
         }
 
         success {
-            echo 'Pipeline completed successfully!'
+            echo 'Tests passed and Docker images were pushed!'
         }
 
         failure {
-            echo 'Pipeline failed. Review the Console Output.'
+            echo 'Pipeline failed. Inspect the failed stage and Console Output.'
         }
 
         cleanup {
-            echo 'Pipeline cleanup section completed.'
+            echo 'Pipeline cleanup completed.'
         }
     }
 }
+
